@@ -61,8 +61,7 @@
       if(e) e.stopPropagation();
       const doc = window.document; const docEl = doc.documentElement;
       const req = docEl.requestFullscreen || docEl.webkitRequestFullscreen;
-      if (!doc.fullscreenElement) { if (req) req.call(docEl).catch(()=>{}); } 
-      else { if (doc.exitFullscreen) doc.exitFullscreen(); }
+      if (!doc.fullscreenElement) { if (req) req.call(docEl).catch(()=>{}); } else { if (doc.exitFullscreen) doc.exitFullscreen(); }
       setTimeout(resize, 200);
     }
     
@@ -86,6 +85,8 @@
 
     const socket = io();
     let myRole = null, myId = null, currentRoom = null, otherPlayers = {};
+    let gameState = 'LOBBY';
+    let syncTimer = 0;
     
     function createRoom() { socket.emit('createRoom'); initAudio(); }
     function joinRoom() { const id = document.getElementById('room-input').value; if(id) { socket.emit('joinRoom', id); initAudio(); } }
@@ -109,11 +110,7 @@
     });
     socket.on('error', msg => alert(msg));
 
-    socket.on('gameStarted', (seed) => {
-      document.getElementById('lobby-ui').style.display = 'none';
-      document.getElementById('game-container').style.display = 'block';
-      initGame();
-    });
+    socket.on('gameStarted', (seed) => { initGame(); });
 
     const canvas = document.getElementById('gameCanvas'); const ctx = canvas.getContext('2d');
     const MAP_WIDTH = 1800, MAP_HEIGHT = 1400; let camera = { x: 0, y: 0 };
@@ -131,7 +128,11 @@
     let generators = [], pallets = [], chests = [], exitGate = { x: 1720, y: 650, w: 60, h: 120, progress: 0, isOpen: false };
 
     function initGame() {
+      gameState = 'PLAYING';
+      document.getElementById('lobby-ui').style.display = 'none';
+      document.getElementById('game-container').style.display = 'block';
       document.getElementById('game-ui').style.display = 'block'; fJoyZone.style.display = 'none';
+      
       if (myRole === 'KILLER') { player.x = 1400; player.y = 1000; player.radius = 22; player.speed = 4.2; } 
       else { player.x = 220 + Math.random()*50; player.y = 220 + Math.random()*50; player.radius = 18; player.speed = 4.5; }
       
@@ -140,42 +141,76 @@
       chests = [{ x: 100, y: 100, progress: 0, isOpen: false, idx: 0 }, { x: 1700, y: 1300, progress: 0, isOpen: false, idx: 1 }];
       requestAnimationFrame(loop);
     }
-        const skillCheck = { active: false, angle: 0, speed: 0.05, sStart: 0, sEnd: 0, gStart: 0, gEnd: 0 };
+        function endGame(winner) {
+      gameState = 'LOBBY';
+      document.getElementById('game-container').style.display = 'none'; document.getElementById('lobby-ui').style.display = 'flex';
+      document.getElementById('room-wait').style.display = 'none'; document.getElementById('lobby-controls').style.display = 'flex';
+      
+      let resText = winner === 'KILLER' ? 'МАНЬЯК ПОБЕДИЛ!' : 'ВЫЖИВШИЕ СБЕЖАЛИ!';
+      let resColor = winner === 'KILLER' ? '#ff3333' : '#4ade80';
+      let resDiv = document.getElementById('game-result');
+      if(!resDiv) { resDiv = document.createElement('h2'); resDiv.id = 'game-result'; document.getElementById('lobby-controls').prepend(resDiv); }
+      resDiv.innerText = resText; resDiv.style.color = resColor;
+      player.isRepairing = false; player.repairTarget = null; skillCheck.active = false;
+    }
+
+    function sendAction(data) { socket.emit('action', data); applyAction(data); }
+
+    function applyAction(data) {
+      if (data.type === 'dropPallet' && pallets[data.idx]) pallets[data.idx].state = 'dropped';
+      if (data.type === 'breakPallet' && pallets[data.idx]) pallets[data.idx].state = 'broken';
+      if (data.type === 'stunKiller' && data.targetId === myId) { player.shakeTimer = 30; player.stunTimer = 120; playTone(100, 0.5, 'sawtooth'); }
+      if (data.type === 'attacked' && data.targetId === myId && player.invTimer <= 0) { 
+          player.hp--; player.invTimer = 90; playTone(110, 0.35, 'sawtooth'); 
+          if (player.hp <= 0) sendAction({type: 'gameOver', winner: 'KILLER'}); 
+      }
+      if (data.type === 'syncProgress') {
+          let tgt = data.obj === 'gen' ? generators[data.idx] : (data.obj === 'chest' ? chests[data.idx] : exitGate);
+          tgt.progress = data.val;
+      }
+      if (data.type === 'completeObj') {
+          let tgt = data.obj === 'gen' ? generators[data.idx] : (data.obj === 'chest' ? chests[data.idx] : exitGate);
+          tgt.progress = 100;
+          if (data.obj === 'gen') { tgt.done = true; playTone(880, 0.3, 'sine'); }
+          if (data.obj === 'chest') {
+              tgt.isOpen = true; playTone(600, 0.2, 'sine');
+              if (player.repairTarget && player.repairTarget.type === 'chest' && player.repairTarget.idx === data.idx) {
+                  player.item = 'flashlight'; player.battery = 100; fJoyZone.style.display = 'block'; player.isRepairing = false;
+              }
+          }
+          if (data.obj === 'gate') { exitGate.isOpen = true; }
+      }
+      if (data.type === 'gameOver') { endGame(data.winner); }
+    }
+    
+    socket.on('syncAction', (data) => applyAction(data));
+    
+    socket.on('playerMoved', (data) => {
+      if (!otherPlayers[data.id]) { otherPlayers[data.id] = { hp: 2, radius: data.role === 'KILLER' ? 22 : 18 }; }
+      otherPlayers[data.id] = { ...otherPlayers[data.id], ...data };
+    });
+
+    const skillCheck = { active: false, angle: 0, speed: 0.05, sStart: 0, sEnd: 0, gStart: 0, gEnd: 0 };
     function triggerSkillCheck() {
       if (skillCheck.active || player.vaulting) return;
       skillCheck.active = true; skillCheck.angle = 0; skillCheck.speed = 0.045 + Math.random() * 0.02;
       const start = 1.6 + Math.random() * 2.2; skillCheck.sStart = start; skillCheck.sEnd = start + 0.8; skillCheck.gStart = skillCheck.sEnd - 0.2; skillCheck.gEnd = skillCheck.sEnd;
       playTone(850, 0.12, 'sine');
     }
+    
     function resolveSkillCheck() {
       if (!skillCheck.active) return; const ang = skillCheck.angle;
-      if (ang >= skillCheck.gStart && ang <= skillCheck.gEnd) { if (player.repairTarget) socket.emit('action', {type: 'progress', obj: player.repairTarget.type, idx: player.repairTarget.idx, val: 6}); playTone(1200, 0.15, 'sine'); } 
-      else if (ang >= skillCheck.sStart && ang <= skillCheck.sEnd) { if (player.repairTarget) socket.emit('action', {type: 'progress', obj: player.repairTarget.type, idx: player.repairTarget.idx, val: 2}); playTone(950, 0.1, 'sine'); } 
-      else { if (player.repairTarget) socket.emit('action', {type: 'progress', obj: player.repairTarget.type, idx: player.repairTarget.idx, val: -12}); playTone(150, 0.4, 'sawtooth'); }
+      let tgt = player.repairTarget; if (!tgt) { skillCheck.active = false; return; }
+      let targetObj = tgt.type === 'gen' ? generators[tgt.idx] : (tgt.type === 'chest' ? chests[tgt.idx] : exitGate);
+
+      if (ang >= skillCheck.gStart && ang <= skillCheck.gEnd) { targetObj.progress = Math.min(100, targetObj.progress + 6); playTone(1200, 0.15, 'sine'); } 
+      else if (ang >= skillCheck.sStart && ang <= skillCheck.sEnd) { targetObj.progress = Math.min(100, targetObj.progress + 2); playTone(950, 0.1, 'sine'); } 
+      else { targetObj.progress = Math.max(0, targetObj.progress - 12); playTone(150, 0.4, 'sawtooth'); }
+      
+      sendAction({type: 'syncProgress', obj: tgt.type, idx: tgt.idx, val: targetObj.progress});
+      if (targetObj.progress >= 100) { sendAction({type: 'completeObj', obj: tgt.type, idx: tgt.idx}); player.isRepairing = false; player.repairTarget = null; }
       skillCheck.active = false;
     }
-
-    socket.on('playerMoved', (data) => {
-      if (!otherPlayers[data.id]) { otherPlayers[data.id] = { hp: 2, radius: data.role === 'KILLER' ? 22 : 18 }; }
-      otherPlayers[data.id] = { ...otherPlayers[data.id], ...data };
-    });
-
-    socket.on('syncAction', (data) => {
-      if (data.type === 'dropPallet' && pallets[data.idx]) pallets[data.idx].state = 'dropped';
-      if (data.type === 'breakPallet' && pallets[data.idx]) pallets[data.idx].state = 'broken';
-      if (data.type === 'stunKiller' && data.targetId === myId) { player.shakeTimer = 30; player.stunTimer = 120; playTone(100, 0.5, 'sawtooth'); }
-      if (data.type === 'attacked' && data.targetId === myId && player.invTimer <= 0) { player.hp--; player.invTimer = 90; playTone(110, 0.35, 'sawtooth'); if (player.hp <= 0) alert('ВАС ПРИНЕСЛИ В ЖЕРТВУ!'); }
-      
-      if (data.type === 'progress') {
-          let tgt = data.obj === 'gen' ? generators[data.idx] : (data.obj === 'chest' ? chests[data.idx] : exitGate);
-          tgt.progress = Math.max(0, Math.min(100, tgt.progress + data.val));
-          if (tgt.progress >= 100) {
-              if (data.obj === 'gen') { tgt.done = true; playTone(880, 0.3, 'sine'); }
-              if (data.obj === 'chest') { tgt.isOpen = true; playTone(600, 0.2, 'sine'); if (player.repairTarget && player.repairTarget.type === 'chest' && player.repairTarget.idx === data.idx) { player.item = 'flashlight'; player.battery = 100; fJoyZone.style.display = 'block'; player.isRepairing = false; } }
-              if (data.obj === 'gate') { exitGate.isOpen = true; }
-          }
-      }
-    });
 
     function startVault(obj) {
         let isVertical = obj.h > obj.w;
@@ -199,9 +234,9 @@
           for (let w of windows) { if (Math.hypot(player.x - w.x - w.w/2, player.y - w.y - w.h/2) < 80) { startVault(w); return; } }
           for (let p of pallets) {
               if (p.state === 'up' && Math.hypot(player.x - p.cx, player.y - p.cy) < 70) {
-                  p.state = 'dropped'; playTone(200, 0.2, 'square'); socket.emit('action', {type: 'dropPallet', idx: p.idx});
+                  sendAction({type: 'dropPallet', idx: p.idx}); playTone(200, 0.2, 'square');
                   let kId = Object.keys(otherPlayers).find(id => otherPlayers[id].role === 'KILLER');
-                  if (kId && Math.hypot(otherPlayers[kId].x - p.cx, otherPlayers[kId].y - p.cy) < 95) socket.emit('action', {type: 'stunKiller', targetId: kId});
+                  if (kId && Math.hypot(otherPlayers[kId].x - p.cx, otherPlayers[kId].y - p.cy) < 120) { sendAction({type: 'stunKiller', targetId: kId}); }
                   return;
               }
           }
@@ -210,11 +245,13 @@
           if (generators.filter(g => !g.done).length === 0 && Math.hypot(player.x - (exitGate.x+30), player.y - (exitGate.y+60)) < 95) { player.isRepairing = !player.isRepairing; player.repairTarget = player.isRepairing ? {type: 'gate', idx: 0} : null; }
       } else if (myRole === 'KILLER') {
           player.state = 'ATTACK'; setTimeout(() => player.state = 'IDLE', 500);
+          let hit = false;
           for (let id in otherPlayers) {
               let op = otherPlayers[id];
-              if (op.role === 'SURVIVOR' && Math.hypot(player.x - op.x, player.y - op.y) < 60) socket.emit('action', {type: 'attacked', targetId: id});
+              if (op.role === 'SURVIVOR' && Math.hypot(player.x - op.x, player.y - op.y) < 60) { sendAction({type: 'attacked', targetId: id}); hit = true; }
           }
-          for (let p of pallets) { if (p.state === 'dropped' && Math.hypot(player.x - p.cx, player.y - p.cy) < 70) { socket.emit('action', {type: 'breakPallet', idx: p.idx}); playTone(150, 0.3, 'square'); } }
+          if (!hit) playTone(50, 0.2, 'sine');
+          for (let p of pallets) { if (p.state === 'dropped' && Math.hypot(player.x - p.cx, player.y - p.cy) < 70) { sendAction({type: 'breakPallet', idx: p.idx}); playTone(150, 0.3, 'square'); } }
       }
     });
 
@@ -281,8 +318,23 @@
       if (player.blindTimer > 0) player.blindTimer--;
 
       if (player.isRepairing && player.repairTarget) {
-          socket.emit('action', {type: 'progress', obj: player.repairTarget.type, idx: player.repairTarget.idx, val: 0.16});
-          if (!skillCheck.active && player.repairTarget.type === 'gen' && Math.random() < 0.009) triggerSkillCheck();
+          let tgt = player.repairTarget;
+          let targetObj = tgt.type === 'gen' ? generators[tgt.idx] : (tgt.type === 'chest' ? chests[tgt.idx] : exitGate);
+
+          if (!targetObj.done && !targetObj.isOpen) {
+              targetObj.progress += 0.25;
+              syncTimer++;
+              if (syncTimer > 30) {
+                  socket.emit('action', {type: 'syncProgress', obj: tgt.type, idx: tgt.idx, val: targetObj.progress});
+                  syncTimer = 0;
+              }
+              if (targetObj.progress >= 100) {
+                  sendAction({type: 'completeObj', obj: tgt.type, idx: tgt.idx});
+                  player.isRepairing = false; player.repairTarget = null;
+              } else if (!skillCheck.active && tgt.type === 'gen' && Math.random() < 0.009) {
+                  triggerSkillCheck();
+              }
+          }
       }
       
       if (skillCheck.active) { skillCheck.angle += skillCheck.speed; if (skillCheck.angle > Math.PI * 2) resolveSkillCheck(); }
@@ -293,6 +345,7 @@
               player.battery -= 0.15; player.isRepairing = false; player.repairTarget = null; player.flashlightAngle = fJoyV.angle;
               if (player.battery <= 0) { player.item = null; fJoyZone.style.display = 'none'; resetFJoy(); }
           }
+          if (exitGate.isOpen && player.x > exitGate.x + 25) { sendAction({type: 'gameOver', winner: 'SURVIVORS'}); }
       } else if (myRole === 'KILLER' && player.stunTimer <= 0) {
           let beingBlinded = false;
           for (let id in otherPlayers) {
@@ -360,7 +413,6 @@
         if (!g.done && g.progress > 0) { ctx.fillStyle = "#3b82f6"; ctx.fillRect(g.x-30, g.y-35, (g.progress/100)*60, 8); }
       });
 
-      // Рендер чужих игроков и их фонариков
       for (let id in otherPlayers) {
           let op = otherPlayers[id];
           ctx.beginPath(); ctx.arc(op.x, op.y, op.radius, 0, Math.PI*2);
@@ -375,7 +427,6 @@
           }
       }
 
-      // Рендер себя
       ctx.beginPath(); ctx.arc(player.x, player.y, player.radius, 0, Math.PI*2);
       ctx.fillStyle = myRole === 'KILLER' ? (player.state === 'ATTACK' || player.stunTimer > 0 ? "#ef4444" : "#991b1b") : (player.hp === 1 ? "#ef4444" : "#3b82f6");
       if (player.invTimer % 6 < 3) { ctx.fill(); ctx.stroke(); }
@@ -388,16 +439,13 @@
       }
       ctx.restore();
 
-      // Отрисовка белого экрана для маньяка
       if (myRole === 'KILLER') {
           let blindAlpha = 0;
           if (player.blindTimer > 0) blindAlpha = 1;
           else if (player.blindProgress > 0) blindAlpha = player.blindProgress / 100;
           
           if (blindAlpha > 0) {
-              ctx.setTransform(1, 0, 0, 1, 0, 0);
-              ctx.fillStyle = `rgba(255, 255, 255, ${blindAlpha})`;
-              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = `rgba(255, 255, 255, ${blindAlpha})`; ctx.fillRect(0, 0, canvas.width, canvas.height);
           }
       }
 
@@ -409,8 +457,8 @@
         ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(nx, ny); ctx.strokeStyle="#ef4444"; ctx.lineWidth=5; ctx.stroke();
       }
     }
-    function loop() { update(); render(); requestAnimationFrame(loop); }
+    
+    function loop() { if (gameState === 'PLAYING') { update(); render(); } requestAnimationFrame(loop); }
   </script>
 </body>
 </html>
-  
