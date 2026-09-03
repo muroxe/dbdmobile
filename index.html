@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Dead by Daylight Multiplayer</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body, html { width: 100%; height: 100%; margin: 0; padding: 0; background-color: #000; font-family: Arial, sans-serif; overflow: hidden; color: #fff; touch-action: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    #game-container { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+    canvas { display: block; width: 100%; height: 100%; }
+    
+    #lobby-ui { position: absolute; z-index: 200; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; background: radial-gradient(circle, #1f100a 0%, #050505 100%); }
+    .lobby-btn { background: #3b82f6; border: 2px solid #fff; color: white; padding: 15px 30px; font-size: 18px; font-weight: bold; cursor: pointer; border-radius: 8px; margin: 10px; width: 250px; }
+    .lobby-btn:active { background: #2563eb; transform: scale(0.95); }
+    #room-input { padding: 15px; font-size: 18px; text-align: center; width: 220px; border-radius: 8px; border: 2px solid #555; background: #222; color: #fff; margin: 10px; }
+    
+    #fullscreen-btn { position: absolute; top: 15px; right: 15px; z-index: 1000; background: rgba(20, 20, 20, 0.8); border: 1px solid #555; color: #aaa; padding: 10px 15px; border-radius: 6px; font-weight: bold; font-size: 14px; cursor: pointer; pointer-events: auto; }
+    #game-ui { display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; z-index: 100; }
+    #hud { position: absolute; top: 15px; left: 50%; transform: translateX(-50%); display: flex; gap: 20px; background: rgba(0, 0, 0, 0.75); padding: 10px 20px; border-radius: 12px; border: 1px solid #444; font-size: 14px; font-weight: bold; }
+    #joystick-zone { position: absolute; bottom: 30px; left: 30px; width: 150px; height: 150px; background: rgba(255, 255, 255, 0.05); border: 2px dashed rgba(255, 255, 255, 0.2); border-radius: 50%; pointer-events: auto; }
+    #joystick-knob { position: absolute; top: 50%; left: 50%; width: 50px; height: 50px; background: rgba(255, 255, 255, 0.6); border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+    #flashlight-zone { display: none; position: absolute; bottom: 30px; right: 150px; width: 110px; height: 110px; background: rgba(25, 118, 210, 0.15); border: 2px dashed rgba(25, 118, 210, 0.4); border-radius: 50%; pointer-events: auto; }
+    #flashlight-knob { position: absolute; top: 50%; left: 50%; width: 40px; height: 40px; background: rgba(25, 118, 210, 0.8); border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+    #action-btn { position: absolute; bottom: 30px; right: 30px; width: 100px; height: 100px; border-radius: 50%; background: #b71c1c; border: 3px solid #ff4444; color: #fff; font-size: 14px; font-weight: bold; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 15px rgba(255, 0, 0, 0.6); pointer-events: auto; }
+  </style>
+</head>
+<body>
+  <div id="lobby-ui">
+    <h1 style="font-size: 40px; margin-bottom: 50px;">DEAD BY DAYLIGHT</h1>
+    <div id="lobby-controls" style="display:flex; flex-direction:column; align-items:center;">
+      <button class="lobby-btn" onclick="createRoom()">Создать игру (Маньяк)</button>
+      <div style="margin: 20px 0; color: #777;">ИЛИ</div>
+      <input id="room-input" type="text" placeholder="Код комнаты">
+      <button class="lobby-btn" onclick="joinRoom()">Зайти (Выживший)</button>
+    </div>
+    <div id="room-wait" style="display:none; text-align:center;">
+      <h2>Код комнаты: <span id="room-code-display" style="color:#eab308; font-size:32px;"></span></h2>
+      <ul id="players-list" style="list-style:none; padding:0; font-size:20px; color:#aaa; margin-bottom: 30px;"></ul>
+      <button id="start-btn" class="lobby-btn" style="display:none; background:#22c55e;" onclick="startGame()">НАЧАТЬ МАТЧ</button>
+    </div>
+  </div>
+
+  <div id="game-container" style="display:none;">
+    <canvas id="gameCanvas"></canvas>
+    <button id="fullscreen-btn" onclick="toggleFullscreen(event)">⛶ Экран</button>
+    <div id="game-ui">
+      <div id="hud">
+        <div>ГЕНЕРАТОРЫ: <span id="gens-left" style="color:#ff4444;">4</span></div>
+        <div>СТАТУС: <span id="player-hp" style="color:#4ade80;">ЗДОРОВ</span></div>
+      </div>
+      <div id="joystick-zone"><div id="joystick-knob"></div></div>
+      <div id="flashlight-zone"><div id="flashlight-knob"></div></div>
+      <div id="action-btn">ДЕЙСТВИЕ</div>
+    </div>
+  </div>
+    <script>
+    const socket = io();
+    let myRole = null;
+    let myId = null;
+    let currentRoom = null;
+    let otherPlayers = {};
+    
+    function createRoom() { socket.emit('createRoom'); }
+    function joinRoom() { const id = document.getElementById('room-input').value; if(id) socket.emit('joinRoom', id); }
+    function startGame() { socket.emit('startGame', currentRoom); }
+
+    socket.on('roomCreated', (roomId, role) => {
+      myRole = role; myId = socket.id; currentRoom = roomId;
+      document.getElementById('lobby-controls').style.display = 'none';
+      document.getElementById('room-wait').style.display = 'block';
+      document.getElementById('room-code-display').innerText = roomId;
+      document.getElementById('start-btn').style.display = 'block';
+    });
+
+    socket.on('roomJoined', (roomId, role) => {
+      myRole = role; myId = socket.id; currentRoom = roomId;
+      document.getElementById('lobby-controls').style.display = 'none';
+      document.getElementById('room-wait').style.display = 'block';
+      document.getElementById('room-code-display').innerText = roomId;
+    });
+
+    socket.on('updatePlayers', (players) => {
+      const list = document.getElementById('players-list');
+      list.innerHTML = '';
+      players.forEach(p => {
+        const li = document.createElement('li');
+        li.innerText = p.role === 'KILLER' ? '👹 Маньяк (Хост)' : '🏃 Выживший';
+        list.appendChild(li);
+      });
+    });
+
+    socket.on('error', msg => alert(msg));
+
+    socket.on('gameStarted', (seed) => {
+      document.getElementById('lobby-ui').style.display = 'none';
+      document.getElementById('game-container').style.display = 'block';
+      initGame(seed);
+    });
+
+    socket.on('playerMoved', (data) => {
+      if (!otherPlayers[data.id]) { otherPlayers[data.id] = { hp: 2, radius: data.role === 'KILLER' ? 22 : 18 }; }
+      otherPlayers[data.id] = { ...otherPlayers[data.id], ...data };
+    });
+
+    socket.on('syncAction', (data) => {
+      if (data.type === 'dropPallet' && pallets[data.idx]) pallets[data.idx].state = 'dropped';
+      if (data.type === 'breakPallet' && pallets[data.idx]) pallets[data.idx].state = 'broken';
+      if (data.type === 'genProgress' && generators[data.idx]) {
+          generators[data.idx].progress = data.progress;
+          if (data.progress >= 100) generators[data.idx].done = true;
+      }
+      if (data.type === 'attacked' && data.targetId === myId) {
+          player.hp--; player.invTimer = 90;
+          if (player.hp <= 0) alert('ВАС ПРИНЕСЛИ В ЖЕРТВУ');
+      }
+    });
+
+    // --- GAME ENGINE ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const MAP_WIDTH = 1800, MAP_HEIGHT = 1400;
+    let camera = { x: 0, y: 0 };
+    function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize); resize();
+
+    const joyZone = document.getElementById('joystick-zone');
+    const joyKnob = document.getElementById('joystick-knob');
+    const actionBtn = document.getElementById('action-btn');
+
+    let player = { x: 0, y: 0, radius: 18, speed: 4.5, hp: 2, angle: Math.PI/2, state: 'IDLE', invTimer: 0 };
+    const obstacles = [
+      { x: 400, y: 300, w: 120, h: 80 }, { x: 800, y: 200, w: 250, h: 100 },
+      { x: 1200, y: 450, w: 100, h: 120 }, { x: 300, y: 800, w: 300, h: 90 },
+      { x: 850, y: 750, w: 180, h: 180 }, { x: 600, y: 1100, w: 100, h: 80 }
+    ];
+    let generators = [], pallets = [];
+    const allPalletSpawns = [
+      { x: 520, y: 350, w: 20, h: 120, cx: 530, cy: 410 }, { x: 700, y: 150, w: 100, h: 20, cx: 750, cy: 160 },
+      { x: 1050, y: 750, w: 20, h: 150, cx: 1060, cy: 825 }, { x: 600, y: 750, w: 150, h: 20, cx: 675, cy: 760 }
+    ];
+
+    function initGame(seed) {
+      document.getElementById('game-ui').style.display = 'block';
+      if (myRole === 'KILLER') {
+          player.x = 1400; player.y = 1000; player.radius = 22; player.speed = 4.2;
+      } else {
+          player.x = 220 + (Math.random() * 100); player.y = 220; player.radius = 18; player.speed = 4.5;
+      }
+      
+      let allGens = [{x: 260, y: 550}, {x: 950, y: 350}, {x: 600, y: 950}, {x: 1450, y: 850}];
+      generators = allGens.map((g, i) => ({x: g.x, y: g.y, progress: 0, done: false, idx: i}));
+      pallets = allPalletSpawns.map((p, i) => ({...p, state: 'up', idx: i}));
+      requestAnimationFrame(loop);
+    }
+
+    actionBtn.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      if (myRole === 'SURVIVOR') {
+          for (let p of pallets) {
+              if (p.state === 'up' && Math.hypot(player.x - p.cx, player.y - p.cy) < 70) {
+                  p.state = 'dropped'; socket.emit('action', {type: 'dropPallet', idx: p.idx}); return;
+              }
+          }
+          for (let g of generators) {
+              if (!g.done && Math.hypot(player.x - g.x, player.y - g.y) < 75) {
+                  g.progress += 5; socket.emit('action', {type: 'genProgress', idx: g.idx, progress: g.progress}); return;
+              }
+          }
+      } else if (myRole === 'KILLER') {
+          player.state = 'ATTACK';
+          setTimeout(() => player.state = 'IDLE', 500);
+          for (let id in otherPlayers) {
+              let op = otherPlayers[id];
+              if (op.role === 'SURVIVOR' && Math.hypot(player.x - op.x, player.y - op.y) < 60) {
+                  socket.emit('action', {type: 'attacked', targetId: id});
+              }
+          }
+          for (let p of pallets) {
+              if (p.state === 'dropped' && Math.hypot(player.x - p.cx, player.y - p.cy) < 70) {
+                  p.state = 'broken'; socket.emit('action', {type: 'breakPallet', idx: p.idx});
+              }
+          }
+      }
+    });
+
+    let joyV = { x: 0, y: 0 }; let joyTouchId = null;
+    function updateJoy(cx, cy) {
+      const rect = joyZone.getBoundingClientRect();
+      let dx = cx - (rect.left + rect.width / 2), dy = cy - (rect.top + rect.height / 2);
+      const dist = Math.hypot(dx, dy), maxR = rect.width / 2;
+      if (dist > maxR) { dx = (dx / dist) * maxR; dy = (dy / dist) * maxR; }
+      joyKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+      joyV.x = dx / maxR; joyV.y = dy / maxR;
+    }
+    function resetJoy() { joyV = {x:0, y:0}; joyKnob.style.transform = `translate(-50%, -50%)`; joyTouchId = null; }
+    joyZone.addEventListener('pointerdown', (e) => { joyTouchId = e.pointerId; updateJoy(e.clientX, e.clientY); joyZone.setPointerCapture(e.pointerId); });
+    joyZone.addEventListener('pointermove', (e) => { if (joyTouchId === e.pointerId) updateJoy(e.clientX, e.clientY); });
+    joyZone.addEventListener('pointerup', resetJoy); joyZone.addEventListener('pointercancel', resetJoy);
+
+    const keys = {}; window.addEventListener('keydown', e => keys[e.code] = true); window.addEventListener('keyup', e => keys[e.code] = false);
+
+    function checkWall(x, y, r) {
+      if (x - r < 0 || x + r > MAP_WIDTH || y - r < 0 || y + r > MAP_HEIGHT) return true;
+      for (let b of obstacles) {
+        const cx = Math.max(b.x, Math.min(x, b.x + b.w)), cy = Math.max(b.y, Math.min(y, b.y + b.h));
+        if (((x - cx)**2 + (y - cy)**2) < r**2) return true;
+      }
+      for (let p of pallets) {
+        if (p.state === 'dropped') {
+            const cx = Math.max(p.x, Math.min(x, p.x + p.w)), cy = Math.max(p.y, Math.min(y, p.y + p.h));
+            if (((x - cx)**2 + (y - cy)**2) < r**2) return true;
+        }
+      }
+      return false;
+    }
+
+    function update() {
+      let mx = joyV.x, my = joyV.y;
+      if (keys['KeyW'] || keys['ArrowUp']) my -= 1;
+      if (keys['KeyS'] || keys['ArrowDown']) my += 1;
+      if (keys['KeyA'] || keys['ArrowLeft']) mx -= 1;
+      if (keys['KeyD'] || keys['ArrowRight']) mx += 1;
+      const len = Math.hypot(mx, my);
+      
+      let moved = false;
+      if (len > 0.05) {
+        player.angle = Math.atan2(my, mx);
+        const nx = player.x + (mx / len) * player.speed, ny = player.y + (my / len) * player.speed;
+        if (!checkWall(nx, player.y, player.radius)) { player.x = nx; moved = true; }
+        if (!checkWall(player.x, ny, player.radius)) { player.y = ny; moved = true; }
+      }
+      
+      if (player.invTimer > 0) player.invTimer--;
+      
+      if (moved || player.state === 'ATTACK') {
+          socket.emit('playerMove', { role: myRole, x: player.x, y: player.y, angle: player.angle, state: player.state });
+      }
+
+      const rem = generators.filter(g => !g.done).length;
+      document.getElementById('gens-left').innerText = rem > 0 ? rem : 'ВОРОТА!';
+      document.getElementById('player-hp').innerText = myRole === 'KILLER' ? 'МАНЬЯК' : (player.hp === 2 ? 'ЗДОРОВ' : 'РАНЕН');
+    }
+    
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const cx = canvas.width / 2, cy = canvas.height / 2;
+      
+      camera.x = Math.max(0, Math.min(player.x - cx, MAP_WIDTH - canvas.width));
+      camera.y = Math.max(0, Math.min(player.y - cy, MAP_HEIGHT - canvas.height));
+      ctx.save(); ctx.translate(-camera.x, -camera.y);
+
+      ctx.fillStyle = "#141714"; ctx.fillRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
+      ctx.fillStyle = "#2c332d"; ctx.strokeStyle = "#404c42"; ctx.lineWidth = 3;
+      obstacles.forEach(o => { ctx.fillRect(o.x, o.y, o.w, o.h); ctx.strokeRect(o.x, o.y, o.w, o.h); });
+
+      for (let p of pallets) {
+        if (p.state === 'broken') continue;
+        if (p.state === 'up') { ctx.fillStyle = '#b45309'; ctx.fillRect(p.cx - 10, p.cy - 10, 20, 20); } 
+        else if (p.state === 'dropped') { ctx.fillStyle = '#78350f'; ctx.fillRect(p.x, p.y, p.w, p.h); }
+      }
+
+      generators.forEach(g => {
+        ctx.fillStyle = g.done ? "#22c55e" : "#eab308"; ctx.fillRect(g.x-22, g.y-22, 44, 44);
+        if (!g.done && g.progress > 0) { ctx.fillStyle = "#3b82f6"; ctx.fillRect(g.x-30, g.y-35, (g.progress/100)*60, 8); }
+      });
+
+      // Отрисовка других игроков
+      for (let id in otherPlayers) {
+          let op = otherPlayers[id];
+          ctx.beginPath(); ctx.arc(op.x, op.y, op.radius, 0, Math.PI*2);
+          ctx.fillStyle = op.role === 'KILLER' ? (op.state === 'ATTACK' ? "#ef4444" : "#991b1b") : "#3b82f6";
+          ctx.fill(); ctx.stroke();
+          
+          ctx.beginPath(); ctx.moveTo(op.x, op.y);
+          ctx.arc(op.x, op.y, op.radius + 15, op.angle - 0.3, op.angle + 0.3);
+          ctx.fillStyle = "rgba(255,255,255,0.3)"; ctx.fill();
+      }
+
+      // Отрисовка себя
+      ctx.beginPath(); ctx.arc(player.x, player.y, player.radius, 0, Math.PI*2);
+      ctx.fillStyle = myRole === 'KILLER' ? (player.state === 'ATTACK' ? "#ef4444" : "#991b1b") : (player.hp === 1 ? "#ef4444" : "#3b82f6");
+      if (player.invTimer % 6 < 3) { ctx.fill(); ctx.stroke(); }
+      
+      ctx.beginPath(); ctx.moveTo(player.x, player.y);
+      ctx.arc(player.x, player.y, player.radius + 15, player.angle - 0.3, player.angle + 0.3);
+      ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.fill();
+
+      ctx.restore();
+    }
+    function loop() { update(); render(); requestAnimationFrame(loop); }
+  </script>
+</body>
+  </html>
+  
