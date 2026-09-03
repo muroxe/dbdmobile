@@ -87,6 +87,7 @@
     let myRole = null, myId = null, currentRoom = null, otherPlayers = {};
     let gameState = 'LOBBY';
     let syncTimer = 0;
+    let lastNetworkSend = 0; 
     
     function createRoom() { socket.emit('createRoom'); initAudio(); }
     function joinRoom() { const id = document.getElementById('room-input').value; if(id) { socket.emit('joinRoom', id); initAudio(); } }
@@ -185,9 +186,22 @@
     
     socket.on('syncAction', (data) => applyAction(data));
     
+    // Плавная интерполяция
     socket.on('playerMoved', (data) => {
-      if (!otherPlayers[data.id]) { otherPlayers[data.id] = { hp: 2, radius: data.role === 'KILLER' ? 22 : 18 }; }
-      otherPlayers[data.id] = { ...otherPlayers[data.id], ...data };
+      if (!otherPlayers[data.id]) {
+        otherPlayers[data.id] = { 
+          x: data.x, y: data.y, targetX: data.x, targetY: data.y,
+          angle: data.angle, targetAngle: data.angle,
+          hp: 2, radius: data.role === 'KILLER' ? 22 : 18 
+        };
+      }
+      otherPlayers[data.id].targetX = data.x;
+      otherPlayers[data.id].targetY = data.y;
+      otherPlayers[data.id].targetAngle = data.angle;
+      otherPlayers[data.id].role = data.role;
+      otherPlayers[data.id].state = data.state;
+      otherPlayers[data.id].flashlightActive = data.flashlightActive;
+      otherPlayers[data.id].flashlightAngle = data.flashlightAngle;
     });
 
     const skillCheck = { active: false, angle: 0, speed: 0.05, sStart: 0, sEnd: 0, gStart: 0, gEnd: 0 };
@@ -366,8 +380,34 @@
           if (!beingBlinded) player.blindProgress = Math.max(0, player.blindProgress - 1);
       }
 
-      socket.emit('playerMove', { role: myRole, x: player.x, y: player.y, angle: player.angle, state: player.state, flashlightActive: player.flashlightActive, flashlightAngle: player.flashlightAngle });
+      // Ограничение отправки: раз в 25 мс, чтобы не нагружать бесплатный сервер
+      const now = Date.now();
+      if (now - lastNetworkSend > 25) {
+        socket.emit('playerMove', { 
+          role: myRole, x: player.x, y: player.y, angle: player.angle, 
+          state: player.state, flashlightActive: player.flashlightActive, flashlightAngle: player.flashlightAngle 
+        });
+        lastNetworkSend = now;
+      }
       
+      // Динамическая интерполяция и исправление бага с углом поворота
+      for (let id in otherPlayers) {
+        let op = otherPlayers[id];
+        if (op.targetX !== undefined && op.targetY !== undefined) {
+          let dist = Math.hypot(op.targetX - op.x, op.targetY - op.y);
+          let lerpFactor = dist > 50 ? 0.3 : 0.1; // Если далеко - догоняем быстрее, если рядом - плавно скользим
+          
+          op.x += (op.targetX - op.x) * lerpFactor;
+          op.y += (op.targetY - op.y) * lerpFactor;
+
+          // Корректировка поворота без дерганий
+          let aDiff = op.targetAngle - op.angle;
+          while (aDiff < -Math.PI) aDiff += Math.PI * 2;
+          while (aDiff > Math.PI) aDiff -= Math.PI * 2;
+          op.angle += aDiff * lerpFactor;
+        }
+      }
+
       const rem = generators.filter(g => !g.done).length;
       document.getElementById('gens-left').innerText = rem > 0 ? rem : 'ВОРОТА!';
       document.getElementById('player-hp').innerText = myRole === 'KILLER' ? 'МАНЬЯК' : (player.hp === 2 ? 'ЗДОРОВ' : 'РАНЕН');
@@ -401,7 +441,7 @@
 
       for (let p of pallets) {
         if (p.state === 'broken') continue;
-        if (p.state === 'up') { ctx.fillStyle = '#b45309'; ctx.fillRect(p.cx - 10, p.cy - 10, 20, 20); ctx.fillStyle = '#fef3c7'; ctx.fillRect(p.cx - 4, p.cy - 4, 8, 8); } 
+        if (p.state === 'up') { ctx.fillStyle = '#b45309'; ctx.fillRect(p.cx - 10, p.cy - 10, 20, 20); } 
         else if (p.state === 'dropped') { ctx.fillStyle = '#78350f'; ctx.fillRect(p.x, p.y, p.w, p.h); }
       }
       for (let c of chests) {
@@ -462,3 +502,4 @@
   </script>
 </body>
 </html>
+  
